@@ -38,15 +38,15 @@ int main(void)
 	    perror("socket");
 	    exit(1);
 	}
-
 	
-	// FIXME: This is just for debug
+#ifndef NDEBUG
 	const int enable = 1;
 	if (setsockopt(socket_fd, SOL_SOCKET, SO_REUSEADDR, &enable, sizeof(int)) < 0)
 	{
 	    perror("setsockopt - SO_REUSEADDR");
 	    exit(1);
 	}
+#endif
 
 	// set to nonblocking
 	status = fcntl(socket_fd, F_SETFL, fcntl(socket_fd, F_GETFL, 0) | O_NONBLOCK);
@@ -284,8 +284,9 @@ int main(void)
 			    for (int i = index; i < socket_amt - 1; ++i)
 			    {
 				// move backwards
-				read_buf[i] = read_buf[i + 1];
-				request_data_buf[i] = request_data_buf[i+1];
+
+				read_buffers[i] = read_buffers[i + 1];
+				request_data_buffers[i] = request_data_buffers[i + 1];
 				read_offset[i] = read_offset[i + 1];
 				start_of_request[i] = start_of_request[i + 1];
 			    }
@@ -297,7 +298,6 @@ int main(void)
 				connection_list[i + 1] = connection_list[i + 3];
 				connection_list[i + 1] -= 1;
 			    }
-
 
 			    // resize resource lists
 			    --socket_amt;
