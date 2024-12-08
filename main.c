@@ -166,8 +166,6 @@ int main(void)
 
 		int index = socket_amt - 1;
 
-		printf("accepted connection on fd %d at index %d\n", connection_fd, index);
-
 		read_buffers = (char**)realloc(read_buffers, sizeof(char*) * socket_amt);
 		read_buffers[index] = calloc(read_buf_size, sizeof(char));
 		
@@ -187,8 +185,6 @@ int main(void)
 		connection_list[index * 2 + 1] = index;
 	    }
 
-	    
-
 	}
 
 
@@ -196,8 +192,6 @@ int main(void)
 
 	
 	// Networking
-
-
 
 	// get epoll events for the connections
 	int event_count = epoll_wait(epoll_fd, events, events_amt, 0);
@@ -214,11 +208,13 @@ int main(void)
 
 	    // get index into resources from fd
 	    int index = -1;
+	    int connection_list_index;
 	    for (int i = 0; i < connection_list_size; i += 2)
 	    {
 		if (connection_list[i] == fd)
 		{
 		    index = connection_list[i + 1];
+		    connection_list_index = i;
 		    break;
 		}
 	    }
@@ -268,7 +264,7 @@ int main(void)
 		    
 		    switch (request_type)
 		    {
-			case REQUEST_TYPE_EXIT: 
+			case REQUEST_TYPE_EXIT:
 			{
 			    // send ack
 			    uint8_t packet_size;
@@ -284,21 +280,37 @@ int main(void)
 			    free(read_buf);
 			    free(request_data_buf);
 
-			    // move resources back for other sockets
-			    for (int i = index; i < connection_list_size; i += 2)
+			    // move everything backwards inside resource lists
+			    for (int i = index; i < socket_amt - 1; ++i)
+			    {
+				// move backwards
+				read_buf[i] = read_buf[i + 1];
+				request_data_buf[i] = request_data_buf[i+1];
+				read_offset[i] = read_offset[i + 1];
+				start_of_request[i] = start_of_request[i + 1];
+			    }
+
+			    // move everything backwards inside the connection list, and decrement their indices
+			    for (int i = connection_list_index; i < connection_list_size - 2; i += 2)
 			    {
 				connection_list[i] = connection_list[i + 2];
 				connection_list[i + 1] = connection_list[i + 3];
+				connection_list[i + 1] -= 1;
 			    }
 
+
+			    // resize resource lists
 			    --socket_amt;
 
 			    read_buffers = (char**)realloc(read_buffers, sizeof(char*) * socket_amt);
 			    request_data_buffers = (char**)realloc(request_data_buffers, sizeof(char*) * socket_amt);
+			    read_offsets = (int*)realloc(read_offsets, sizeof(int) * socket_amt);
+			    start_of_requests = (int*)realloc(start_of_requests, sizeof(int) * socket_amt);
 			    
 			    connection_list_size = socket_amt * 2;
 			    connection_list = (int*)realloc(connection_list, sizeof(int) * connection_list_size);
 
+			    // remove from epoll
 			    status = epoll_ctl(epoll_fd, EPOLL_CTL_DEL, fd, NULL);
 			    if (status == -1)
 			    {
@@ -306,7 +318,9 @@ int main(void)
 				exit(1);
 			    }
 
-			    printf("closed connection on fd %d\n", fd);
+			    close(fd);
+
+			    goto END_OF_EVENT;
 			}
 			
 			case REQUEST_TYPE_GET_THRESHOLD:
@@ -414,11 +428,11 @@ int main(void)
 		    }
 		}
 
+	      END_OF_EVENT:
+		break;
 	    }
 	}
     }
-
-  CLEANUP:
 
     // Cleanup
 
