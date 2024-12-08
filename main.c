@@ -7,6 +7,7 @@
 #include <errno.h>
 #include <unistd.h>
 #include <fcntl.h>
+#include <signal.h>
 #include <sys/types.h>
 #include <sys/epoll.h>
 
@@ -23,6 +24,13 @@ typedef struct epoll_event epoll_event;
 
 const int port_num = 2255;
 const int max_connections = 10;
+
+int should_shutdown = 0;
+
+void signal_shutdown_handler(int signal)
+{
+    should_shutdown = 1;
+}
 
 int main(void)
 {
@@ -91,6 +99,13 @@ int main(void)
 	exit(1);
     }
 
+    signal(SIGINT, signal_shutdown_handler);
+    signal(SIGABRT, signal_shutdown_handler);
+    signal(SIGTERM, signal_shutdown_handler);
+    signal(SIGHUP, signal_shutdown_handler);
+    signal(SIGQUIT, signal_shutdown_handler);
+    signal(SIGTSTP, signal_shutdown_handler);
+
     // Sensor vars
     int noise_threshold = 0;
 
@@ -125,6 +140,11 @@ int main(void)
 
     while (1)
     {
+	if (should_shutdown != 0)
+	{
+	    break;
+	}
+
 	// Handle new connections
 	{
 	    // Get connection
