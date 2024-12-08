@@ -22,7 +22,7 @@ typedef struct sockaddr sockaddr;
 typedef struct epoll_event epoll_event;
 
 const int port_num = 2255;
-const int max_connections = 1;
+const int max_connections = 10;
 
 int main(void)
 {
@@ -39,10 +39,20 @@ int main(void)
 	    exit(1);
 	}
 
+	
+	// FIXME: This is just for debug
 	const int enable = 1;
 	if (setsockopt(socket_fd, SOL_SOCKET, SO_REUSEADDR, &enable, sizeof(int)) < 0)
 	{
 	    perror("setsockopt - SO_REUSEADDR");
+	    exit(1);
+	}
+
+	// set to nonblocking
+	status = fcntl(socket_fd, F_SETFL, fcntl(socket_fd, F_GETFL, 0) | O_NONBLOCK);
+	if (status == -1)
+	{
+	    perror("fcntl");
 	    exit(1);
 	}
     }
@@ -72,94 +82,154 @@ int main(void)
 	}
     }
 
-    int connection_fd;
-    // Get connection
-    {
-	sockaddr_in client_addr = {0};
-	socklen_t client_len = sizeof(client_addr);
-	connection_fd = accept(socket_fd, (sockaddr*)&client_addr, &client_len);
-	if (connection_fd == -1)
-	{
-	    perror("accept");
-	    exit(1);
-	}
 
-	// set to nonblocking
-	status = fcntl(connection_fd, F_SETFL, fcntl(connection_fd, F_GETFL, 0) | O_NONBLOCK);
-	if (status == -1)
-	{
-	    perror("fcntl");
-	    exit(1);
-	}
-
-    }
-
-    int epoll_fd;
     // epoll creation
+    int epoll_fd = epoll_create1(0);
+    if (epoll_fd == -1)
     {
-	epoll_fd = epoll_create1(0);
-	if (epoll_fd == -1)
-	{
-	    perror("epoll_create1");
-	    exit(1);
-	}
-	
-	epoll_event event;
-	event.events = EPOLLIN | EPOLLET;
-	event.data.fd = connection_fd;
-	
-	status = epoll_ctl(epoll_fd, EPOLL_CTL_ADD, connection_fd, &event);
-	if (status == -1)
-	{
-	    perror("epoll_ctl");
-	    exit(1);
-	}
+	perror("epoll_create1");
+	exit(1);
     }
 
-    // Variables for noise
+    // Sensor vars
     int noise_threshold = 0;
 
+    // Connection vars
     int socket_amt = 0;
-    int *sockets;
 
     // epoll events
     const int events_amt = 5;
     epoll_event events[events_amt];
 
     // reading buffer
-    char **read_buffers; // one per connection
+    char **read_buffers = NULL; // one per connection
     const int read_buf_size = 255;
-    char read_buf[read_buf_size];
+//    char read_buf[read_buf_size];
     int read_offset = 0;
 
     // request buffer
-    char **request_data_buffers; // one per connection
-    char request_data_buf[253];
+    char **request_data_buffers = NULL; // one per connection
+    const int request_data_buf_size = 253;
+//    char request_data_buf[request_data_buf_size];
     int start_of_request = 0;
 
     // packet send buffer
     const int packet_send_buf_size = 255;
     char packet_send_buf[packet_send_buf_size];
 
+    // connection list
+    /* Stores the fd and its associated index into
+       request_data_buffers, and read_buffers */
+    int connection_list_size = 0;
+    int *connection_list = NULL; // stored like {fd_1, index_1, fd_2, index_2, ...};
+
     while (1)
     {
+	// Handle new connections
+	{
+	    // set to nonblocking
+	    status = fcntl(socket_fd, F_SETFL, fcntl(socket_fd, F_GETFL, 0) | O_NONBLOCK);
+	    if (status == -1)
+	    {
+		perror("fcntl");
+		exit(1);
+	    }
+
+	    // Get connection
+	    int connection_fd;
+	    sockaddr_in client_addr = {0};
+	    socklen_t client_len = sizeof(client_addr);
+	    connection_fd = accept(socket_fd, (sockaddr*)&client_addr, &client_len);
+	    if (connection_fd == -1 && !(errno == EAGAIN || errno == EWOULDBLOCK))
+	    {
+		perror("accept");
+		exit(1);
+	    }
+
+	    if (connection_fd != -1)
+	    {
+		printf("accepted connection on fd %d\n", connection_fd);
+
+		// set connection to nonblocking
+		status = fcntl(connection_fd, F_SETFL, fcntl(connection_fd, F_GETFL, 0) | O_NONBLOCK);
+		if (status == -1)
+		{
+		    perror("fcntl");
+		    exit(1);
+		}
+
+		// add connection to epoll
+		epoll_event event;
+		event.events = EPOLLIN | EPOLLET;
+		event.data.fd = connection_fd;
+		
+		status = epoll_ctl(epoll_fd, EPOLL_CTL_ADD, connection_fd, &event);
+		if (status == -1)
+		{
+		    perror("epoll_ctl");
+		    exit(1);
+		}
+
+		// Allocate resources
+		++socket_amt;
+
+		int index = socket_amt - 1;
+
+		read_buffers = (char**)realloc(read_buffers, sizeof(char*) * socket_amt);
+		read_buffers[index] = calloc(read_buf_size, sizeof(char));
+		request_data_buffers = (char**)realloc(request_data_buffers, sizeof(char*) * socket_amt);
+		request_data_buffers[index] = calloc(request_data_buf_size, sizeof(char));
+
+		// Create map entry
+		connection_list_size = socket_amt * 2;
+		connection_list = (int*)realloc(connection_list, sizeof(int) * connection_list_size);
+		connection_list[index * 2] = connection_fd;
+		connection_list[index * 2 + 1] = index;
+	    }
+
+	    
+
+	}
+
 
 	// NOTE: do gpio stuff here
 
 	
 	// Networking
-	int event_count = epoll_wait(epoll_fd, events, events_amt, -1);
+
+	// get epoll events for the connections
+	int event_count = epoll_wait(epoll_fd, events, events_amt, 0);
 	if (event_count == -1)
 	{
 	    perror("epoll_wait");
 	    exit(1);
 	}
 
-	
+	// go over the epoll events for the connections
 	for (int event_index = 0; event_index < event_count; ++event_index)
 	{
 	    int fd = events[event_index].data.fd;
 
+	    // get index into resources from fd
+	    int index = -1;
+	    for (int i = 0; i < connection_list_size; i +=2)
+	    {
+		if (connection_list[i] == fd)
+		{
+		    index = i;
+		    break;
+		}
+	    }
+	    if (index == -1)
+	    {
+		fprintf(stderr, "ERROR: failed to find index for fd %d\n", fd);
+		exit(1);
+	    }
+
+	    char *read_buf = read_buffers[index];
+	    char *request_data_buf = request_data_buffers[index];
+
+	    // over multiple reads
 	    while (1)
 	    {
 
@@ -176,6 +246,7 @@ int main(void)
 		
 		int bytes_parsed = 0;
 		
+		// parse stuff in this read
 		while (bytes_parsed < bytes_read)
 		{
 		    // load request
@@ -200,7 +271,31 @@ int main(void)
 				exit(1);
 			    }
 
-			    goto CLEANUP;
+			    // deallocate resources
+			    free(read_buf);
+			    free(request_data_buf);
+
+			    // move resources back for other sockets
+			    for (int i = index; i < connection_list_size; i += 2)
+			    {
+				connection_list[i] = connection_list[i + 2];
+				connection_list[i + 1] = connection_list[i + 3];
+			    }
+
+			    --socket_amt;
+
+			    read_buffers = (char**)realloc(read_buffers, sizeof(char*) * socket_amt);
+			    request_data_buffers = (char**)realloc(request_data_buffers, sizeof(char*) * socket_amt);
+			    
+			    connection_list_size = socket_amt * 2;
+			    connection_list = (int*)realloc(connection_list, sizeof(int) * connection_list_size);
+
+			    status = epoll_ctl(epoll_fd, EPOLL_CTL_DEL, fd, NULL);
+			    if (status == -1)
+			    {
+				perror("epoll_ctl");
+				exit(1);
+			    }
 			}
 			
 			case REQUEST_TYPE_GET_THRESHOLD:
@@ -323,12 +418,22 @@ int main(void)
 	exit(1);
     }
 
-    status = close(connection_fd);
-    if (status == -1)
+    for (int i = 0; i < connection_list_size; i += 2)
     {
-	perror("close");
-	exit(1);
+	status = close(connection_list[i]);
+	if (status == -1)
+	{
+	    perror("close");
+	    exit(1);
+	}
+
+	int index = connection_list[i + 1];
+	free(read_buffers[index]);
+	free(request_data_buffers[index]);
     }
+    free(read_buffers);
+    free(request_data_buffers);
+    free(connection_list);
 
     status = close(socket_fd);
     if (status == -1)
