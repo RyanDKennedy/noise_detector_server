@@ -104,14 +104,14 @@ int main(void)
     // reading buffer
     char **read_buffers = NULL; // one per connection
     const int read_buf_size = 255;
-//    char read_buf[read_buf_size];
-    int read_offset = 0;
+
+    // array whose length is socket_amt
+    int *read_offsets = NULL;
 
     // request buffer
     char **request_data_buffers = NULL; // one per connection
     const int request_data_buf_size = 253;
-//    char request_data_buf[request_data_buf_size];
-    int start_of_request = 0;
+    int *start_of_requests = NULL;
 
     // packet send buffer
     const int packet_send_buf_size = 255;
@@ -127,14 +127,6 @@ int main(void)
     {
 	// Handle new connections
 	{
-	    // set to nonblocking
-	    status = fcntl(socket_fd, F_SETFL, fcntl(socket_fd, F_GETFL, 0) | O_NONBLOCK);
-	    if (status == -1)
-	    {
-		perror("fcntl");
-		exit(1);
-	    }
-
 	    // Get connection
 	    int connection_fd;
 	    sockaddr_in client_addr = {0};
@@ -148,7 +140,6 @@ int main(void)
 
 	    if (connection_fd != -1)
 	    {
-		printf("accepted connection on fd %d\n", connection_fd);
 
 		// set connection to nonblocking
 		status = fcntl(connection_fd, F_SETFL, fcntl(connection_fd, F_GETFL, 0) | O_NONBLOCK);
@@ -175,10 +166,19 @@ int main(void)
 
 		int index = socket_amt - 1;
 
+		printf("accepted connection on fd %d at index %d\n", connection_fd, index);
+
 		read_buffers = (char**)realloc(read_buffers, sizeof(char*) * socket_amt);
 		read_buffers[index] = calloc(read_buf_size, sizeof(char));
+		
 		request_data_buffers = (char**)realloc(request_data_buffers, sizeof(char*) * socket_amt);
 		request_data_buffers[index] = calloc(request_data_buf_size, sizeof(char));
+
+		read_offsets = (int*)realloc(read_offsets, sizeof(int) * socket_amt);
+		read_offsets[index] = 0;
+
+		start_of_requests = (int*)realloc(start_of_requests, sizeof(int) * socket_amt);
+		start_of_requests[index] = 0;
 
 		// Create map entry
 		connection_list_size = socket_amt * 2;
@@ -197,6 +197,8 @@ int main(void)
 	
 	// Networking
 
+
+
 	// get epoll events for the connections
 	int event_count = epoll_wait(epoll_fd, events, events_amt, 0);
 	if (event_count == -1)
@@ -212,11 +214,11 @@ int main(void)
 
 	    // get index into resources from fd
 	    int index = -1;
-	    for (int i = 0; i < connection_list_size; i +=2)
+	    for (int i = 0; i < connection_list_size; i += 2)
 	    {
 		if (connection_list[i] == fd)
 		{
-		    index = i;
+		    index = connection_list[i + 1];
 		    break;
 		}
 	    }
@@ -228,12 +230,19 @@ int main(void)
 
 	    char *read_buf = read_buffers[index];
 	    char *request_data_buf = request_data_buffers[index];
+	    int *read_offset = &read_offsets[index];
+	    int *start_of_request = &start_of_requests[index];
 
 	    // over multiple reads
 	    while (1)
 	    {
+		int bytes_read = read(fd, read_buf, read_buf_size - *read_offset);
 
-		int bytes_read = read(fd, read_buf, read_buf_size - read_offset);
+		if (bytes_read == -1 && !(errno == EAGAIN || errno == EWOULDBLOCK))
+		{
+		    perror("read");
+		    exit(1);
+		}
 
 		// stop if it is empty
 		if (bytes_read == -1 && (errno == EAGAIN || errno == EWOULDBLOCK))
@@ -241,8 +250,8 @@ int main(void)
 		    break;
 		}
 		
-		bytes_read += read_offset;
-		read_offset = 0;
+		bytes_read += *read_offset;
+		*read_offset = 0;
 		
 		int bytes_parsed = 0;
 		
@@ -250,12 +259,12 @@ int main(void)
 		while (bytes_parsed < bytes_read)
 		{
 		    // load request
-		    uint8_t request_size = read_buf[start_of_request];
-		    uint8_t request_type = read_buf[start_of_request + 1];
-		    uint8_t request_options = read_buf[start_of_request + 2];
+		    uint8_t request_size = read_buf[*start_of_request];
+		    uint8_t request_type = read_buf[*start_of_request + 1];
+		    uint8_t request_options = read_buf[*start_of_request + 2];
 		    uint8_t request_data_size = request_size - 3;
 		    request_data_buf[request_data_size] = '\0';
-		    memcpy(request_data_buf, &read_buf[start_of_request + 3], request_size - 3);
+		    memcpy(request_data_buf, &read_buf[*start_of_request + 3], request_size - 3);
 		    
 		    switch (request_type)
 		    {
@@ -296,6 +305,8 @@ int main(void)
 				perror("epoll_ctl");
 				exit(1);
 			    }
+
+			    printf("closed connection on fd %d\n", fd);
 			}
 			
 			case REQUEST_TYPE_GET_THRESHOLD:
@@ -368,7 +379,7 @@ int main(void)
 		    // handle moving to next request
 		    if (new_bytes_parsed < bytes_read)
 		    {
-			uint8_t start_of_next_request = start_of_request + request_size;
+			uint8_t start_of_next_request = *start_of_request + request_size;
 			uint8_t next_request_size = read_buf[start_of_next_request];
 			
 			if (new_bytes_parsed + next_request_size > bytes_read)
@@ -386,23 +397,23 @@ int main(void)
 			    bytes_parsed = bytes_read;
 			    
 			    // make sure next loop is ready
-			    start_of_request = 0;
-			    read_offset = bytes_read - new_bytes_parsed;
+			    *start_of_request = 0;
+			    *read_offset = bytes_read - new_bytes_parsed;
 			}
 			else
 			{
 			    // Move to next request that fits
-			    start_of_request = start_of_next_request;
+			    *start_of_request = start_of_next_request;
 			    bytes_parsed += request_size;
 			}
 		    }
 		    else
 		    {
-			start_of_request = 0;
+			*start_of_request = 0;
 			bytes_parsed += request_size;
 		    }
 		}
-		
+
 	    }
 	}
     }
@@ -433,6 +444,8 @@ int main(void)
     }
     free(read_buffers);
     free(request_data_buffers);
+    free(read_offsets);
+    free(start_of_requests);
     free(connection_list);
 
     status = close(socket_fd);
